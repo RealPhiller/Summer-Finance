@@ -780,6 +780,8 @@ def _tab_dashboard(df: pd.DataFrame):
     fig = _chart_area(dff)
     if fig:
         st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("Category Breakdown Over Time will appear once you have data across 2+ months.")
 
     st.markdown("---")
     _section_mom(df)
