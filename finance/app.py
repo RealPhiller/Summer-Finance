@@ -467,10 +467,12 @@ def _chart_monthly(df: pd.DataFrame):
 
 def _chart_area(df: pd.DataFrame):
     exp = df[df["type"] == "expense"].copy()
-    if exp.empty or exp["date"].nunique() < 3:
+    if exp.empty:
         return None
     exp["date"] = pd.to_datetime(exp["date"])
     exp["month"] = exp["date"].dt.to_period("M").dt.to_timestamp()
+    if exp["month"].nunique() < 2:
+        return None
     pivot = exp.groupby(["month", "category"])["amount"].sum().unstack(fill_value=0).reset_index()
     fig = go.Figure()
     for cat in [c for c in CATEGORIES if c in pivot.columns and c not in ("Income", "Transfer")]:
