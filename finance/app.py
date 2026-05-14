@@ -194,6 +194,27 @@ def db_delete(tx_id: int):
             st.error(f"DB delete error: {e}")
 
 
+def db_update(tx_id: int, date_val, description: str, amount: float,
+              type_: str, category: str, payment: str, notes: str) -> bool:
+    db = _get_db()
+    if not db:
+        return False
+    try:
+        db.table("transactions").update({
+            "date":           str(date_val),
+            "description":    description,
+            "amount":         round(float(amount), 2),
+            "type":           type_,
+            "category":       category,
+            "payment_method": payment,
+            "notes":          notes,
+        }).eq("id", tx_id).execute()
+        return True
+    except Exception as e:
+        st.error(f"DB update error: {e}")
+        return False
+
+
 def db_category_hint(desc: str) -> str | None:
     """Return the most common past category for a similar description."""
     db = _get_db()
@@ -484,15 +505,28 @@ def _metric_row(df: pd.DataFrame):
     m_exp = this_m[this_m["type"] == "expense"]["amount"].sum()
     m_inc = this_m[this_m["type"] == "income"]["amount"].sum()
 
-    c1, c2, c3, c4, c5 = st.columns(5)
+    if m_inc > 0:
+        savings_rate = (m_inc - m_exp) / m_inc * 100
+        savings_str  = f"{savings_rate:.1f}%"
+        savings_pos  = savings_rate >= 0
+    else:
+        savings_str = "—"
+        savings_pos = None
+
+    c1, c2, c3 = st.columns(3)
     c1.metric("Total Income",  f"฿{t_inc:,.0f}")
     c2.metric("Total Expense", f"฿{t_exp:,.0f}")
     c3.metric("Net Balance",   f"฿{net:,.0f}",
               delta=f"{'+'if net>=0 else ''}{net:,.0f}",
               delta_color="normal" if net >= 0 else "inverse")
-    c4.metric("This Month",    f"฿{m_exp:,.0f}",
+
+    c4, c5, c6 = st.columns(3)
+    c4.metric("This Month (Exp)", f"฿{m_exp:,.0f}",
               delta=f"income +฿{m_inc:,.0f}" if m_inc > 0 else None)
-    c5.metric("Transactions",  str(len(df)))
+    c5.metric("Transactions",     str(len(df)))
+    c6.metric("Savings Rate (Mo)", savings_str,
+              delta=savings_str if savings_pos is not None else None,
+              delta_color="normal" if savings_pos else ("inverse" if savings_pos is not None else "off"))
 
 
 # ── Tab: Add ──────────────────────────────────────────────────────────────────
@@ -656,6 +690,47 @@ def _tab_add():
                     st.error("Fill in description and amount.")
 
 
+# ── Month-over-Month helper ───────────────────────────────────────────────────
+
+def _section_mom(df: pd.DataFrame):
+    today = date.today()
+    first_this = today.replace(day=1)
+    first_last  = (first_this - timedelta(days=1)).replace(day=1)
+
+    exp = df[df["type"] == "expense"].copy()
+    exp["_date"] = pd.to_datetime(exp["date"])
+
+    this_mask = (exp["_date"].dt.year == today.year) & (exp["_date"].dt.month == today.month)
+    last_mask = (exp["_date"].dt.year == first_last.year) & (exp["_date"].dt.month == first_last.month)
+
+    this_spend = exp[this_mask].groupby("category")["amount"].sum()
+    last_spend = exp[last_mask].groupby("category")["amount"].sum()
+
+    all_cats = sorted(set(this_spend.index) | set(last_spend.index))
+    if not all_cats:
+        st.info("No expense data for this month or last month.")
+        return
+
+    rows = []
+    for cat in all_cats:
+        tm = this_spend.get(cat, 0.0)
+        lm = last_spend.get(cat, 0.0)
+        delta_b   = tm - lm
+        delta_pct = (delta_b / lm * 100) if lm > 0 else float("nan")
+        rows.append({
+            "Category":   cat,
+            "This Month": f"฿{tm:,.0f}",
+            "Last Month": f"฿{lm:,.0f}",
+            "Delta (฿)":  f"{'+'if delta_b>=0 else ''}฿{delta_b:,.0f}",
+            "Delta (%)":  f"{'+'if delta_pct>=0 else ''}{delta_pct:.1f}%" if not pd.isna(delta_pct) else "—",
+        })
+
+    this_label = first_this.strftime("%B %Y")
+    last_label  = first_last.strftime("%B %Y")
+    st.markdown(f"**Month-over-Month: {last_label} → {this_label}**")
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+
 # ── Tab: Dashboard ────────────────────────────────────────────────────────────
 
 def _tab_dashboard(df: pd.DataFrame):
@@ -678,7 +753,7 @@ def _tab_dashboard(df: pd.DataFrame):
         st.info("No data in selected date range.")
         return
 
-    _metric_row(dff)
+    _metric_row(df)
     st.markdown("---")
 
     r1c1, r1c2 = st.columns(2)
@@ -704,6 +779,8 @@ def _tab_dashboard(df: pd.DataFrame):
     if fig:
         st.plotly_chart(fig, use_container_width=True)
 
+    st.markdown("---")
+    _section_mom(df)
     st.markdown("---")
     bot1, bot2 = st.columns(2)
     with bot1:
@@ -780,6 +857,67 @@ def _tab_transactions(df: pd.DataFrame):
             db_delete(int(del_id))
             st.success(f"Deleted #{del_id}")
             st.rerun()
+
+    st.markdown("---")
+    st.markdown("#### Edit Transaction")
+
+    ec1, ec2 = st.columns([1, 3])
+    with ec1:
+        edit_id = st.number_input("Transaction ID", min_value=0, step=1, key="edit_id")
+    with ec2:
+        st.write("")
+        st.write("")
+        if st.button("Load", use_container_width=True, key="edit_load") and edit_id > 0:
+            row = df[df["id"] == int(edit_id)]
+            if row.empty:
+                st.warning(f"No transaction found with ID {int(edit_id)}.")
+            else:
+                r = row.iloc[0]
+                st.session_state["edit_tx"] = {
+                    "id":             int(r["id"]),
+                    "date":           pd.to_datetime(r["date"]).date(),
+                    "description":    str(r.get("description", "")),
+                    "amount":         float(r["amount"]),
+                    "type":           str(r.get("type", "expense")),
+                    "category":       str(r.get("category", CATEGORIES[0])),
+                    "payment_method": str(r.get("payment_method", PAYMENT_METHODS[0])),
+                    "notes":          str(r.get("notes", "") or ""),
+                }
+
+    if "edit_tx" in st.session_state:
+        e = st.session_state["edit_tx"]
+        st.markdown(f"**Editing #{e['id']} — adjust and save:**")
+
+        er1, er2 = st.columns(2)
+        with er1:
+            e_date = st.date_input("Date",         value=e["date"],          key="e_date")
+            e_desc = st.text_input("Description",  value=e["description"],   key="e_desc")
+            e_amt  = st.number_input("Amount (฿)", value=e["amount"],
+                                     min_value=0.0, step=1.0,                key="e_amt")
+            e_type = st.selectbox("Type", ["expense", "income"],
+                                  index=0 if e["type"] != "income" else 1,   key="e_type")
+        with er2:
+            cat_i = CATEGORIES.index(e["category"]) if e["category"] in CATEGORIES else 0
+            e_cat = st.selectbox("Category", CATEGORIES, index=cat_i,        key="e_cat")
+            pm_i  = PAYMENT_METHODS.index(e["payment_method"]) if e["payment_method"] in PAYMENT_METHODS else 4
+            e_pay = st.selectbox("Payment Method", PAYMENT_METHODS, index=pm_i, key="e_pay")
+            e_note = st.text_input("Notes", value=e["notes"],                key="e_note")
+
+        sv1, sv2 = st.columns([3, 1])
+        with sv1:
+            if st.button("Save Changes", type="primary", use_container_width=True, key="edit_save"):
+                if e_desc and e_amt > 0:
+                    ok = db_update(e["id"], e_date, e_desc, e_amt, e_type, e_cat, e_pay, e_note)
+                    if ok:
+                        st.session_state.pop("edit_tx", None)
+                        st.success(f"Updated #{e['id']}: {e_desc} ฿{e_amt:,.0f}")
+                        st.rerun()
+                else:
+                    st.error("Description and amount are required.")
+        with sv2:
+            if st.button("Cancel", use_container_width=True, key="edit_cancel"):
+                st.session_state.pop("edit_tx", None)
+                st.rerun()
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
